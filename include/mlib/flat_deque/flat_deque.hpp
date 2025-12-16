@@ -12,21 +12,33 @@
 #include <memory>
 #include <utility>
 #include <cstddef>
+#include <cstdint>
 
 namespace mlib
 {
+    enum class align : uint8_t
+    {
+        front,
+        center,
+        back
+    };
+
     template< typename type_t,
               size_t initial_grow = 4,
               size_t grow_factor = 2,
               size_t shrink_factor = 2 >
     class flat_deque
     {
+        static_assert(initial_grow > 0, "initial_grow must be greater than 0");
     private:
         std::allocator<type_t> _alloc;
         type_t*                _data = nullptr;
         size_t                 _size = 0;
         size_t                 _capacity = 0;
         size_t                 _head = 0;
+
+    public:
+        class iterator;
 
     public:
         flat_deque() = default;
@@ -40,27 +52,103 @@ namespace mlib
             }
         }
 
+        iterator begin() { return iterator(_data + _head); }
+
+        iterator end() { return iterator(_data + _head + _size); }
+
         type_t* get(const size_t index) const
         {
             assert(index < _size);
             return _data + _head + index;
         }
 
+        size_t size() const { return _size; }
+
+        size_t capacity() const { return _capacity; }
+
+        bool empty() const { return _size == 0; }
+
+        size_t head() const { return _head; }
+
+        type_t* raw_data() { return _data; }
+
+        type_t& operator[](const size_t index) const
+        {
+            assert(index < _size);
+            return _data[_data + _head + index];
+        }
+
+        void reserve(
+            const size_t size,
+            const align align = align::center)
+        {
+            switch (align)
+            {
+                case align::front:
+                    if (_head < size)
+                    {
+                        _grow(size, align);
+                    }
+                    break;
+                case align::back:
+                    if ((_capacity - _size) < size)
+                    {
+                        _grow(size, align);
+                    }
+                    break;
+                case align::center:
+                    if (_head < size/2 || (_capacity - _size) < size/2)
+                    {
+                        _grow(size, align);
+                    }
+                    break;
+            }
+        }
+
         void push_back(const type_t& value)
         {
             if (_head + _size >= _capacity)
             {
-                _grow();
+                _grow(1, align::back);
             }
 
             _alloc.construct(_data + _head + _size, value);
             ++_size;
         }
 
-        size_t size() const { return _size; }
-        size_t capacity() const { return _capacity; }
-        size_t head() const { return _head; }
-        type_t* raw_data() { return _data; }
+        void push_front(const type_t& value)
+        {
+            if (_head == 0)
+            {
+                _grow(1, align::front);
+            }
+
+            assert(_head > 0);
+            _head--;
+            _alloc.construct(_data + _head, value);
+            ++_size;
+        }
+
+        void pop_back()
+        {
+            if (_size < 1) return;
+
+            _alloc.destroy(_data + _head + _size--);
+
+            if (_size <= _capacity/2) _shrink(align::back);
+        }
+
+        void pop_front()
+        {
+            if (_size < 1) return;
+
+            _alloc.destroy(_data + _head);
+            ++_head;
+            --_size;
+
+            if ( _size <= _capacity / 2 )
+                _shrink(align::front);
+        }
 
         void clear()
         {
@@ -88,22 +176,41 @@ namespace mlib
         {
             _size = 0;
             _head = 0;
+            _capacity = 0;
         }
 
-        void _grow()
+        void _grow(
+            const size_t object_count = 1,
+            const align alignment = align::center)
         {
             const size_t old_capacity = _capacity;
             type_t* old_data = _data;
             const size_t old_head = _head;
 
+            const size_t min_required = _size + object_count;
             size_t new_capacity = _capacity == 0 ? initial_grow : _capacity * grow_factor;
-            while (new_capacity < _size)
+            while (new_capacity < min_required)
             {
                 new_capacity *= grow_factor;
             }
 
             type_t* new_data = _alloc.allocate(new_capacity);
             size_t new_head  = (new_capacity - _size) / 2;
+            switch (alignment)
+                // all the cases do need testing ngl.
+            {
+                case align::front:
+                    new_head = object_count;
+                    break;
+                case align::center:
+                    new_head = (new_capacity - _size) / 2;
+                    // new_head = (new_capacity - _size + object_count / 2) / 2;
+                    // new_head = (new_capacity - _size + object_count) / 2;
+                    break;
+                case align::back:
+                    new_head = _head;
+                    break;
+            }
 
             for (size_t i = 0; i < _size; ++i)
             {
@@ -126,6 +233,71 @@ namespace mlib
             _capacity = new_capacity;
             _head = new_head;
         }
+
+        void _shrink(const align alignment)
+        {
+            if (_capacity <= initial_grow) return;
+
+            size_t new_capacity = _capacity / shrink_factor;
+            if (new_capacity < _size) new_capacity = _size;
+
+            type_t* new_data = _alloc.allocate(new_capacity);
+
+            size_t new_head;
+            switch (alignment)
+            {
+                case align::front:
+                    new_head = 0;
+                    break;
+                case align::center:
+                    new_head = (new_capacity - _size) / 2;
+                    break;
+                case align::back:
+                    new_head = new_capacity - _size;
+                    break;
+            }
+
+            for (size_t i = 0; i < _size; ++i)
+                _alloc.construct(new_data + new_head + i,
+                                 std::move(_data[_head + i]));
+
+            for (size_t i = 0; i < _size; ++i)
+                _alloc.destroy(_data + _head + i);
+
+            _alloc.deallocate(_data, _capacity);
+
+            _data = new_data;
+            _capacity = new_capacity;
+            _head = new_head;
+        }
+
+    public:
+        class iterator
+        {
+        public:
+            using value_type = type_t;
+            using pointer = type_t*;
+            using reference = type_t&;
+            using difference_type = std::ptrdiff_t;
+            using iterator_category = std::bidirectional_iterator_tag;
+
+            iterator(const pointer ptr) : _ptr(ptr) {}
+
+            reference operator*() const { return *_ptr; }
+            pointer operator->() { return _ptr; }
+
+            iterator& operator++() { ++_ptr; return *this; }
+            iterator operator++(int) { iterator tmp = *this; ++_ptr; return tmp; }
+
+            iterator& operator--() { --_ptr; return *this; }
+            iterator operator--(int) { iterator tmp = *this; --_ptr; return tmp; }
+
+            bool operator==(const iterator& other) const { return _ptr == other._ptr; }
+            bool operator!=(const iterator& other) const { return _ptr != other._ptr; }
+
+        private:
+            pointer _ptr;
+        };
     };
 }
 
