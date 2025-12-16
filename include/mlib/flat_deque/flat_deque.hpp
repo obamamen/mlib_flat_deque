@@ -23,6 +23,12 @@ namespace mlib
         back
     };
 
+    enum class shrink_mode
+    {
+        conservative,
+        aggressive
+    };
+
     template< typename type_t,
               size_t initial_grow = 4,
               size_t grow_factor = 2,
@@ -116,6 +122,18 @@ namespace mlib
             ++_size;
         }
 
+        template <typename... Args>
+        void emplace_back(Args... args)
+        {
+            if (_head + _size >= _capacity)
+            {
+                _grow(1, align::back);
+            }
+
+            _alloc.construct(_data + _head + _size, std::forward<Args>(args)...);
+            ++_size;
+        }
+
         void push_front(const type_t& value)
         {
             if (_head == 0)
@@ -129,13 +147,36 @@ namespace mlib
             ++_size;
         }
 
+        template <typename... Args>
+        void emplace_front(Args... args)
+        {
+            if (_head == 0)
+            {
+                _grow(1, align::front);
+            }
+
+            assert(_head > 0);
+            _head--;
+            _alloc.construct(_data + _head, std::forward<Args>(args)...);
+            ++_size;
+        }
+
         void pop_back()
         {
             if (_size < 1) return;
 
-            _alloc.destroy(_data + _head + _size--);
+            // std::cout << "DEBUG "
+            //     << "size: " << _size
+            //     << " capacity: " << _capacity
+            //     << " head: " << _head
+            // << "\n";
 
-            if (_size <= _capacity/2) _shrink(align::back);
+            _alloc.destroy(_data + _head + _size - 1);
+            --_size;
+
+            _shrink(align::back);
+            _shrink(align::front);
+            _shrink(align::center);
         }
 
         void pop_front()
@@ -146,14 +187,55 @@ namespace mlib
             ++_head;
             --_size;
 
-            if ( _size <= _capacity / 2 )
-                _shrink(align::front);
+            _shrink(align::front);
+            _shrink(align::back);
+            _shrink(align::center);
+        }
+
+        void pop_from_back(size_t count)
+        {
+            if (count == 0 || _size == 0)
+                return;
+
+            if (count > _size)
+                count = _size;
+
+            for (size_t i = 0; i < count; ++i)
+                _alloc.destroy(_data + _head + _size - 1 - i);
+
+
+            _size -= count;
+
+            _shrink(align::back, shrink_mode::conservative);
+        }
+
+        void pop_from_front(size_t count)
+        {
+            if (count == 0 || _size == 0)
+                return;
+
+            if (count > _size)
+                count = _size;
+
+            for (size_t i = 0; i < count; ++i)
+                _alloc.destroy(_data + _head + i);
+
+
+            _head += count;
+            _size -= count;
+
+            _shrink(align::front, shrink_mode::conservative);
         }
 
         void clear()
         {
             _free_members();
             _reset_member_state();
+        }
+
+        void fit(const align alignment)
+        {
+            _shrink(align::center, shrink_mode::aggressive);
         }
 
     private:
@@ -204,8 +286,6 @@ namespace mlib
                     break;
                 case align::center:
                     new_head = (new_capacity - _size) / 2;
-                    // new_head = (new_capacity - _size + object_count / 2) / 2;
-                    // new_head = (new_capacity - _size + object_count) / 2;
                     break;
                 case align::back:
                     new_head = _head;
@@ -234,12 +314,39 @@ namespace mlib
             _head = new_head;
         }
 
-        void _shrink(const align alignment)
+        void _shrink(
+            const align alignment,
+            const shrink_mode mode = shrink_mode::conservative)
         {
-            if (_capacity <= initial_grow) return;
+            if (_capacity <= initial_grow)
+                return;
 
-            size_t new_capacity = _capacity / shrink_factor;
-            if (new_capacity < _size) new_capacity = _size;
+            size_t new_capacity = _capacity;
+
+            while (true)
+            {
+                const size_t candidate
+                    = new_capacity / shrink_factor;
+
+                if (candidate < initial_grow)
+                    break;
+
+                if (mode == shrink_mode::conservative)
+                {
+                    if (candidate < _size * 2)
+                        break;
+                }
+                else
+                {
+                    if (candidate < _size)
+                        break;
+                }
+
+                new_capacity = candidate;
+            }
+
+            if (new_capacity == _capacity)
+                return;
 
             type_t* new_data = _alloc.allocate(new_capacity);
 
@@ -258,8 +365,11 @@ namespace mlib
             }
 
             for (size_t i = 0; i < _size; ++i)
-                _alloc.construct(new_data + new_head + i,
-                                 std::move(_data[_head + i]));
+            {
+                _alloc.construct(
+                    new_data + new_head + i,
+                    std::move(_data[_head + i]));
+            }
 
             for (size_t i = 0; i < _size; ++i)
                 _alloc.destroy(_data + _head + i);
